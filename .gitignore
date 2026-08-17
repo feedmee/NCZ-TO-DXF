@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build
+.venv-build/
+build/
+dist/
+*.spec.bak
+
+# Calisma ciktilari (kullanici verisi, buyuk dosyalar)
+_full_run/
+_full_run_log.txt
+dxfkmz/
+dxf_cikti/
+*.dxf
+*.kmz
+donusum_raporu.txt
+
+# NCZ girdi verisi (kullanici projesi, depoya ait degil)
+*.ncz
+*.NCZ
+
+# Kisisel/proje-disi calisma notlari (araca ait degil)
+USER.md
+Konuşmalar.txt
