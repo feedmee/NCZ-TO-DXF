@@ -53,7 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-prefix-layers", action="store_true", help="Birlestirirken katman adina dosya adi ekleme")
     p.add_argument("--no-stage1", action="store_true", help="Turkiye TM kutusu filtresini kapat")
     p.add_argument("--no-stage2", action="store_true", help="Dosya-merkezi uzaklik filtresini kapat")
-    p.add_argument("--radius", type=float, default=LOCAL_RADIUS_M, help=f"Asama 2 yaricapi, metre (varsayilan {LOCAL_RADIUS_M:.0f})")
+    p.add_argument(
+        "--radius",
+        type=float,
+        default=LOCAL_RADIUS_M,
+        help="Asama 2 icin istege bagli SERT yaricap tavani, metre. "
+             "Varsayilan: verilmezse uyarlanir bosluk tespiti kullanilir.",
+    )
     p.add_argument("--kinds", default="", help="Sadece bu turleri yaz (virgulle ayrik: text,point,line,polygon,circle,arc,block,symbol). Bos ise hepsi.")
     p.add_argument("--dxf-version", default="R2013", help="DXF surumu (varsayilan R2013)")
     return p

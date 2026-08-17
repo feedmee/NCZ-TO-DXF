@@ -14,6 +14,19 @@ olcumle dogrulanmis iki asamali bir filtreyle ayiklar ve arc/yay yon hatasi
 gibi asagi akis DXF hatalarini duzeltir. Ayrintili teknik gerekce:
 [`ncztool/filters.py`](ncztool/filters.py).
 
+Korunan veriler:
+
+- **Koordinat ve konum** aynen yazilir; reprojeksiyon/kaydirma yapilmaz.
+- **Kot (Z)**: NCZ'de kot varsa DXF'e gecer. Vertex'lerinde farkli kot bulunan
+  cizgi/poligonlar 3B `POLYLINE`, duz olanlar kompakt `LWPOLYLINE` olur.
+  Bozuk okumalar (10^34 mertebesinde cop float'lar ve denormalize degerler)
+  ayiklanir.
+- **Oznitelik verisi**: parsel numarasi gibi alanlar (`label_text`, `name`)
+  her entity'ye `NCZ` appid'li **XDATA** olarak eklenir ve birlestirmeden
+  sonra da korunur. Olcum: 69 dosyalik korpusta 59.142 parsel etiketi +
+  35.227 nokta adi -- bunlarin hicbiri eskiden DXF'e gecmiyordu.
+- **Orijinal NetCAD katman adlari ve renkleri**.
+
 ## Kullanim
 
 ### GUI (onerilen)
@@ -21,10 +34,18 @@ gibi asagi akis DXF hatalarini duzeltir. Ayrintili teknik gerekce:
 `NCZ2DXF.exe` dosyasina cift tiklayin:
 
 1. **Adim 1 - Dosya basina DXF**: NCZ klasoru + cikti klasoru secin, entity
-   turlerini ve filtre ayarlarini (Turkiye TM kutusu, dosya-merkezi uzaklik
-   yaricapi) isteginize gore ayarlayin, **DXF Uret**.
-2. **Adim 2 - Birlestir**: uretilen DXF'lerden istediklerinizi secin
-   (olasi mukerrer dosyalar ⚠ ile isaretlenir), **Birlestir**.
+   turlerini ve filtre ayarlarini isteginize gore ayarlayin, **DXF Uret**.
+2. **Adim 2 - Birlestir**: birlestirilecek DXF'leri secin (olasi mukerrer
+   dosyalar ⚠ ile isaretlenir), **Birlestir**.
+
+Adim 2 **Adim 1'e bagli degildir**: program kapatilip acildiginda da cikti
+klasorundeki mevcut DXF'ler otomatik listelenir (**Yenile** ile tazelenir,
+**DXF klasoru sec...** ile baska bir klasordeki DXF'ler de birlestirilebilir).
+
+Filtre ayarindaki **Yaricap (km)** alani bos birakilirsa asama 2 uyarlanir
+calisir: dosyanin kendi olcegi ne olursa olsun (bir mevki de olabilir, il
+geneli bir veri seti de) gercek veri korunur, yalnizca uzakta ayri duran cop
+kume atilir. Alana bir sayi girilirse ek bir sert tavan olarak uygulanir.
 
 Her calisma sonunda `donusum_raporu.txt` yazilir: dosya basina entity
 sayilari, atilan cop/aykiri veri, tespit edilen CRS (bilgi amacli, donusum

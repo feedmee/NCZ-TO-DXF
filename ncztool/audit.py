@@ -79,6 +79,10 @@ def write_report(path: str | Path, results: list[FileResult], merge_summary: str
             lines.append(f"  Yazilan turler   : {parts}")
         if r.skipped:
             lines.append(f"  Atlanan (gecersiz veri): {r.skipped}")
+        if getattr(r, "with_z", 0):
+            lines.append(f"  Kot (Z) tasiyan  : {r.with_z}")
+        if getattr(r, "circle_default_radius", 0):
+            lines.append(f"  Varsayilan yaricapli cember: {r.circle_default_radius}")
 
     dups = detect_duplicates(ok_results)
     if dups:

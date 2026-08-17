@@ -5,6 +5,7 @@ dokunmaz -- reprojeksiyon/kaydirma yapilmaz (kullanicinin acik talebi).
 """
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,7 +13,33 @@ from typing import Callable, Iterable
 
 import ezdxf
 from ezdxf import bbox as ezbbox
+from ezdxf.addons import importer as _importer_mod
 from ezdxf.addons.importer import Importer
+
+from .dxf_writer import XDATA_APPID
+
+
+@contextlib.contextmanager
+def _keep_xdata_during_import():
+    """Birlestirme sirasinda XDATA'nin (parsel numaralari) korunmasini saglar.
+
+    ezdxf'in Importer'i entity kopyalarken modul duzeyindeki
+    new_clean_entity(entity) fonksiyonunu KEEP_XDATA VERMEDEN cagiriyor;
+    fonksiyonun varsayilani keep_xdata=False oldugu icin butun XDATA
+    siliniyordu (olcum: 1.785 entity'nin XDATA'si merge sonrasi 0'a
+    dusuyordu). Fonksiyon keep_xdata=True'yu zaten destekliyor ama Importer
+    bunu disari acmiyor; bu yuzden yalnizca birlestirme suresince varsayilani
+    True yapip cikista eski haline dondururuz."""
+    original = _importer_mod.new_clean_entity
+
+    def keep_xdata_variant(entity, keep_xdata=True):
+        return original(entity, keep_xdata=True)
+
+    _importer_mod.new_clean_entity = keep_xdata_variant
+    try:
+        yield
+    finally:
+        _importer_mod.new_clean_entity = original
 
 
 @dataclass
@@ -81,27 +108,31 @@ def merge_dxf(
     paths = [Path(p) for p in paths]
     out_path = Path(out_path)
     target = ezdxf.new(dxf_version)
+    # XDATA'nin gecerli olmasi icin appid hedef belgede kayitli olmali.
+    if XDATA_APPID not in target.appids:
+        target.appids.add(XDATA_APPID)
     failed = []
     imported_any = False
 
-    for i, p in enumerate(paths, start=1):
-        if progress:
-            progress(i, len(paths), p.name)
-        try:
-            src = ezdxf.readfile(str(p))
-        except Exception as exc:
-            failed.append((str(p), f"okunamadi: {exc}"))
-            continue
-        try:
-            if prefix_layers:
-                _prefix_layers(src, p.stem)
-            importer = Importer(src, target)
-            importer.import_modelspace()
-            importer.finalize()
-            imported_any = True
-        except Exception as exc:
-            failed.append((str(p), f"aktarilamadi: {exc}"))
-            continue
+    with _keep_xdata_during_import():
+        for i, p in enumerate(paths, start=1):
+            if progress:
+                progress(i, len(paths), p.name)
+            try:
+                src = ezdxf.readfile(str(p))
+            except Exception as exc:
+                failed.append((str(p), f"okunamadi: {exc}"))
+                continue
+            try:
+                if prefix_layers:
+                    _prefix_layers(src, p.stem)
+                importer = Importer(src, target)
+                importer.import_modelspace()
+                importer.finalize()
+                imported_any = True
+            except Exception as exc:
+                failed.append((str(p), f"aktarilamadi: {exc}"))
+                continue
 
     if not imported_any:
         return MergeResult(

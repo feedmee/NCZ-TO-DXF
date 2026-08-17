@@ -45,12 +45,17 @@ class NCZ2DXFApp(tk.Tk):
 
         self.stage1_var = tk.BooleanVar(value=True)
         self.stage2_var = tk.BooleanVar(value=True)
-        self.radius_km_var = tk.StringVar(value=str(int(LOCAL_RADIUS_M / 1000)))
+        # Bos = uyarlanir kesim (varsayilan). Bir sayi girilirse ek sert tavan.
+        self.radius_km_var = tk.StringVar(value="")
         self.prefix_layers_var = tk.BooleanVar(value=True)
         self.kind_vars = {label: tk.BooleanVar(value=True) for label, _ in KIND_GROUPS}
 
         self.file_results: dict[str, object] = {}  # ncz stem -> FileResult
         self.ncz_paths: list[str] = []
+        # Adim 2 listesindeki satirlarla birebir eslesen DXF yollari. Adim 1
+        # bu oturumda calismasa da (program yeniden acildiginda) cikti
+        # klasorunden doldurulur -- bkz. _refresh_dxf_list().
+        self.dxf_paths: list[Path] = []
 
         self._build_widgets()
         self.after(100, self._poll_queue)
@@ -110,11 +115,12 @@ class NCZ2DXFApp(tk.Tk):
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
         ttk.Label(right, text="Filtre:").pack(anchor="w")
         ttk.Checkbutton(right, text="Turkiye TM kutusu (asama 1)", variable=self.stage1_var).pack(anchor="w")
-        ttk.Checkbutton(right, text="Dosya-merkezi uzaklik (asama 2)", variable=self.stage2_var).pack(anchor="w")
+        ttk.Checkbutton(right, text="Uzak cop kumesi (asama 2)", variable=self.stage2_var).pack(anchor="w")
         radius_row = ttk.Frame(right)
         radius_row.pack(anchor="w", pady=(2, 0))
         ttk.Label(radius_row, text="  Yaricap (km):").pack(side="left")
         ttk.Entry(radius_row, textvariable=self.radius_km_var, width=8).pack(side="left")
+        ttk.Label(right, text="  (bos birakin = otomatik)", foreground="gray").pack(anchor="w")
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
         ttk.Button(right, text="DXF Uret", command=self._start_step1).pack(anchor="w")
@@ -122,13 +128,15 @@ class NCZ2DXFApp(tk.Tk):
     def _build_step2(self, parent):
         left = ttk.Frame(parent)
         left.pack(side="left", fill="both", expand=True)
-        ttk.Label(left, text="Uretilen DXF'ler (Adim 1 sonrasi dolar; ⚠ = olasi mukerrer):").pack(anchor="w")
+        ttk.Label(left, text="Birlestirilecek DXF'ler (⚠ = olasi mukerrer):").pack(anchor="w")
         self.dxf_listbox = tk.Listbox(left, selectmode="extended")
         self.dxf_listbox.pack(fill="both", expand=True)
         btn_row = ttk.Frame(left)
         btn_row.pack(fill="x", pady=2)
         ttk.Button(btn_row, text="Tumunu sec", command=lambda: self.dxf_listbox.select_set(0, "end")).pack(side="left")
         ttk.Button(btn_row, text="Secimi kaldir", command=lambda: self.dxf_listbox.select_clear(0, "end")).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Yenile", command=self._refresh_dxf_list).pack(side="left")
+        ttk.Button(btn_row, text="DXF klasoru sec...", command=self._pick_dxf_folder).pack(side="left", padx=4)
 
         right = ttk.Frame(parent, padding=(12, 0))
         right.pack(side="left", fill="y")
@@ -146,11 +154,57 @@ class NCZ2DXFApp(tk.Tk):
             if not self.out_folder.get():
                 self.out_folder.set(str(Path(d) / "dxf_cikti"))
             self._refresh_ncz_list()
+            self._refresh_dxf_list()  # onceki oturumun DXF'leri varsa Adim 2 hazir olsun
 
     def _pick_out_folder(self):
         d = filedialog.askdirectory(title="Cikti klasoru sec")
         if d:
             self.out_folder.set(d)
+            self._refresh_dxf_list()
+
+    def _pick_dxf_folder(self):
+        """Birlestirilecek DXF'leri istege bagli baska bir klasorden al."""
+        d = filedialog.askdirectory(title="Birlestirilecek DXF klasoru sec")
+        if d:
+            self._refresh_dxf_list(Path(d))
+
+    def _refresh_dxf_list(self, folder: Path | None = None):
+        """Adim 2 listesini diskteki DXF'lerden doldurur.
+
+        Adim 1'in bu oturumda calismis olmasi GEREKMEZ; program kapatilip
+        acildiginda da cikti klasorundeki mevcut DXF'ler listelenir."""
+        if folder is None:
+            out = self.out_folder.get()
+            if not out:
+                return
+            folder = Path(out) / "per_file"
+            if not folder.is_dir():
+                folder = Path(out)
+        if not folder.is_dir():
+            return
+        paths = sorted(folder.glob("*.dxf"), key=lambda p: p.name.lower())
+        merge_name = (self.merge_name_var.get() or "birlesik.dxf").lower()
+        paths = [p for p in paths if p.name.lower() != merge_name]  # kendi ciktisini alma
+
+        dup_stems = self._duplicate_stems()
+        self.dxf_listbox.delete(0, "end")
+        self.dxf_paths = paths
+        for p in paths:
+            mark = "⚠ " if p.stem in dup_stems else ""
+            self.dxf_listbox.insert("end", f"{mark}{p.stem}")
+        self.dxf_listbox.select_set(0, "end")
+        self._log(f"Adim 2: {len(paths)} DXF listelendi ({folder})")
+
+    def _duplicate_stems(self) -> set:
+        """Adim 1 bu oturumda calistiysa mukerrer isaretlerini korur."""
+        results = [r for r in self.file_results.values() if getattr(r, "ok", False)]
+        if not results:
+            return set()
+        stems = set()
+        for d in detect_duplicates(results):
+            stems.add(Path(d.file_a).stem)
+            stems.add(Path(d.file_b).stem)
+        return stems
 
     def _refresh_ncz_list(self):
         folder = self.ncz_folder.get()
@@ -179,10 +233,11 @@ class NCZ2DXFApp(tk.Tk):
         return kinds or set(ALL_KINDS)
 
     def _write_options(self) -> WriteOptions:
+        text = self.radius_km_var.get().strip()
         try:
-            radius = float(self.radius_km_var.get()) * 1000.0
+            radius = float(text) * 1000.0 if text else None
         except ValueError:
-            radius = LOCAL_RADIUS_M
+            radius = None  # gecersiz giris -> uyarlanir kesim
         return WriteOptions(
             include_kinds=self._selected_kinds(),
             stage1_enabled=self.stage1_var.get(),
@@ -227,8 +282,7 @@ class NCZ2DXFApp(tk.Tk):
         if not out_folder:
             messagebox.showwarning("Uyari", "Cikti klasoru secin.")
             return
-        names = [self.dxf_listbox.get(i) for i in sel]
-        paths = [self.file_results[n.lstrip("⚠ ")].out_path for n in names]
+        paths = [self.dxf_paths[i] for i in sel]
         merge_name = self.merge_name_var.get() or "birlesik.dxf"
         out_path = Path(out_folder) / merge_name
         prefix = self.prefix_layers_var.get()
@@ -280,6 +334,7 @@ class NCZ2DXFApp(tk.Tk):
             self._log(f"Adim 1 tamamlandi. Rapor: {report_path}")
 
             self.dxf_listbox.delete(0, "end")
+            self.dxf_paths = [r.out_path for r in ok_results]
             for r in ok_results:
                 mark = "⚠ " if r.ncz_path.stem in dup_names else ""
                 self.dxf_listbox.insert("end", f"{mark}{r.ncz_path.stem}")

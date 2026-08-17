@@ -19,6 +19,17 @@ asagidaki hatalar duzeltildi:
   5. $INSUNITS=metre, $EXTMIN/$EXTMAX ve modelspace vport yaziliyor ki CAD
      dosyayi actiginda dogrudan veriye baksin.
   6. include_kinds ile TEXT/POINT/BLOCK gibi turler secmeli disi birakilabilir.
+  7. KOT (Z) korunuyor. Olcum (69+2 dosya): vertex'lerin %7,8'i gercek kot
+     tasiyor (medyan 1022 m -- Konya platosu), %92,1'i 0 (2B veri), %0,05'i
+     bozuk (parser bazi offsetlerde 1e34 mertebesinde cop float32 okuyor).
+     Bozuk/aralik disi Z sifirlanir, gecerli Z yazilir. Vertex'lerinde farkli
+     Z bulunan cizgi/poligonlar POLYLINE (3B) olarak, duz olanlar eskisi gibi
+     LWPOLYLINE olarak yazilir -- boylece 2B dosyalarda cikti buyumez.
+  8. OZNITELIK (attribute) verisi XDATA olarak yaziliyor. Olcum: parseller
+     'label_text' alaninda 59.142, noktalar 'name' alaninda 35.227 parsel
+     numarasi (orn. "181/32", "367/1") tasiyor ve bunlarin hicbiri eskiden
+     DXF'e gecmiyordu. Artik her entity'ye 'NCZ' appid'li XDATA olarak
+     eklenir; CAD tarafinda sorgulanabilir ve merge sirasinda korunur.
 """
 from __future__ import annotations
 
@@ -41,6 +52,37 @@ TEXT_HEIGHT_MIN = 0.2
 TEXT_HEIGHT_MAX = 50.0
 MAX_RADIUS_M = 10_000.0
 
+# NCZ'de yaricap tasimayan cember icin varsayilan (kullanici istegi).
+# Yaricapsiz cemberi atlamak yerine gorunur bir isaret olarak cizeriz.
+DEFAULT_CIRCLE_RADIUS_M = 1.0
+
+# Gecerli kot araligi (metre). Turkiye'de en dusuk kara ~ -0 m, en yuksek
+# Agri 5137 m; parser'in bozuk okumalari (1e34 mertebesinde) bu araligin
+# cok disinda kaldigi icin guvenle ayiklanir.
+Z_MIN, Z_MAX = -500.0, 5500.0
+
+# Sifira bu kadar yakin kotlar 2B kabul edilir. Parser bazi vertex'lerde
+# 3,19e-27 gibi denormalize cop float'lar okuyor; bunlar araliga girdigi
+# icin "kot var" saniliyor ve entity gereksiz yere 3B POLYLINE'a
+# donusturuluyordu (olcum: AYRANCI'da 78 sahte 3B poligon). Olcum
+# hassasiyeti mikrometrenin altinda anlamsizdir.
+Z_EPSILON = 1e-6
+
+# XDATA icin uygulama adi. CAD tarafinda bu appid ile sorgulanir.
+XDATA_APPID = "NCZ"
+
+# XDATA'ya tasinacak oznitelik alanlari: (entity anahtari, XDATA etiketi)
+XDATA_FIELDS = (
+    ("label_text", "label"),
+    ("name", "name"),
+    ("geometry_kind", "kind"),
+    ("layer_code", "layer_code"),
+    ("box_width", "box_width"),
+    ("box_height", "box_height"),
+    ("scale", "scale"),
+    ("radius", "radius"),
+)
+
 
 @dataclass
 class WriteOptions:
@@ -49,9 +91,12 @@ class WriteOptions:
     stage1_enabled: bool = True
     stage2_enabled: bool = True
     bbox: tuple = TR_BBOX
-    radius: float = LOCAL_RADIUS_M
+    radius: float | None = LOCAL_RADIUS_M
     text_height_range: tuple = (TEXT_HEIGHT_MIN, TEXT_HEIGHT_MAX)
     max_radius: float = MAX_RADIUS_M
+    default_circle_radius: float = DEFAULT_CIRCLE_RADIUS_M
+    write_elevation: bool = True
+    write_xdata: bool = True
 
 
 @dataclass
@@ -65,6 +110,30 @@ class FileResult:
     entity_stats: dict = field(default_factory=dict)  # kind -> written count
     skipped: int = 0
     filter_stats: FilterStats | None = None
+    with_z: int = 0  # gercek kot tasiyan entity sayisi
+    circle_default_radius: int = 0  # varsayilan yaricapla cizilen cember sayisi
+
+
+#: DXF satir tabanli bir formattir; bu karakterler yapiyi bozar.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def sanitize_dxf_text(value, max_len: int = 250) -> str:
+    """DXF'e yazilabilir metin dondurur; bozuk okumayi tamamen atar.
+
+    Parser bazi bloklarda metin alani yerine HAM IKILI VERI okuyor (olcum:
+    Okçu.NCZ'de 3 adet TEXT entity). Bu diziler NUL ve SATIR SONU icerdigi
+    icin satir tabanli DXF yapisini kiriyor ve tek bir bozuk metin TUM
+    dosyayi okunamaz hale getiriyordu ("Invalid group code" ile acilmiyordu).
+
+    Gecerli NetCAD etiketleri ("181/32", "H_MENFEZ", Turkce harfler dahil)
+    hicbir zaman kontrol karakteri icermez; bu yuzden kontrol karakteri
+    goren dizi bozuk kabul edilip bos dondurulur."""
+    if not isinstance(value, str) or not value:
+        return ""
+    if _CONTROL_RE.search(value):
+        return ""  # bozuk okuma -- yazma
+    return value.strip()[:max_len]
 
 
 def sanitize_layer_name(name, fallback="KATMANSIZ"):
@@ -133,27 +202,119 @@ def _clip_text_height(height, rng):
     return max(lo, min(hi, height))
 
 
+def clean_z(z) -> float:
+    """Bozuk/aralik disi kot degerlerini 0'a indirger.
+
+    Parser bazi offsetlerde cop float okuyor (olcumde 1e34 ve -1e38
+    mertebesinde degerler goruldu; bunlar 1^34 gibi kucuk sayilar DEGIL,
+    bilimsel gosterimde 10 uzeri 34 buyuklugunde bozuk okumalardir).
+    Gecerli kotlar Z_MIN..Z_MAX araliginda tutulur."""
+    if z is None:
+        return 0.0
+    try:
+        z = float(z)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(z) or not (Z_MIN <= z <= Z_MAX):
+        return 0.0
+    if abs(z) < Z_EPSILON:
+        return 0.0  # denormalize cop okuma; 2B kabul et
+    return z
+
+
+#: Parser'in kot okumasi guvenilmez olan turler.
+#: _parse_triangle() ucgenin SADECE ilk kosesinin Z'sini okuyor (B ve C
+#: koselerine z_offset vermiyor, onlar 0 kaliyor). Bu da 3B yazildiginda
+#: gercekte olmayan dik bir sicrama uretiyor (olcum: KNY dosyasindaki 206
+#: ucgenin tamami boyle). Bu turler 2B yazilir.
+PARTIAL_Z_KINDS = {"Triangle"}
+
+
+def entity_points(entity, with_z: bool = True):
+    """Entity koordinatlarini (x, y, z) uclulerine cevirir."""
+    coords = entity.get("coordinates") or []
+    if with_z and entity.get("geometry_kind") not in PARTIAL_Z_KINDS:
+        return [(c["x"], c["y"], clean_z(c.get("z"))) for c in coords]
+    return [(c["x"], c["y"], 0.0) for c in coords]
+
+
+def _has_elevation(pts) -> bool:
+    return any(p[2] != 0.0 for p in pts)
+
+
+def _xdata_tags(entity) -> list[tuple[int, str]]:
+    """Entity'nin oznitelik alanlarini XDATA string etiketlerine cevirir.
+
+    NetCAD oznitelik tablosunda gorunen parsel numarasi gibi veriler
+    parser ciktisinda 'label_text' / 'name' alanlarinda geliyor ve eskiden
+    DXF'e hic yazilmiyordu. Bos/sifir alanlar atlanir."""
+    tags = []
+    for key, tag in XDATA_FIELDS:
+        value = entity.get(key)
+        if value in (None, "", 0, 0.0):
+            continue
+        if isinstance(value, str):
+            value = sanitize_dxf_text(value, max_len=200)
+            if not value:
+                continue  # bozuk ikili okuma -- XDATA'ya da yazma
+            text = f"{tag}={value}"
+        elif isinstance(value, float):
+            text = f"{tag}={value:g}"
+        else:
+            text = f"{tag}={value}"
+        tags.append((1000, text[:255]))  # DXF string grup kodu siniri
+    return tags
+
+
+def apply_xdata(dxf_entity, entity, enabled: bool = True):
+    if not enabled:
+        return
+    tags = _xdata_tags(entity)
+    if not tags:
+        return
+    try:
+        dxf_entity.set_xdata(XDATA_APPID, tags)
+    except Exception:
+        pass  # XDATA yazilamazsa geometri yine de kaybolmasin
+
+
+def _add_path(msp, pts, closed, dxfattribs, options):
+    """Cizgi/poligon yazar. Vertex'lerde gercek kot varsa 3B POLYLINE,
+    yoksa (verinin %92'si) daha kompakt LWPOLYLINE kullanilir."""
+    if options.write_elevation and _has_elevation(pts):
+        return msp.add_polyline3d(pts, close=closed, dxfattribs=dxfattribs)
+    return msp.add_lwpolyline(
+        [(p[0], p[1]) for p in pts], close=closed, dxfattribs=dxfattribs
+    )
+
+
 def add_entity_to_dxf(msp, entity, layer_name, stats, options: WriteOptions):
     kind = entity.get("geometry_kind")
     if kind not in options.include_kinds:
         stats["skipped"] += 1
         return
-    coords = entity.get("coordinates") or []
-    pts = [(c["x"], c["y"]) for c in coords]
+    pts = entity_points(entity, with_z=options.write_elevation)
 
     dxfattribs = {"layer": layer_name}
 
+    def finish(dxf_entity, counter):
+        apply_color(dxf_entity, entity.get("color_argb"))
+        apply_xdata(dxf_entity, entity, options.write_xdata)
+        stats[counter] += 1
+        if options.write_elevation and _has_elevation(pts):
+            stats["with_z"] += 1
+
     if kind == "Text":
-        if not pts or not entity.get("label_text"):
+        label = sanitize_dxf_text(entity.get("label_text"))
+        if not pts or not label:
             stats["skipped"] += 1
             return
         attribs = dict(dxfattribs)
         attribs["height"] = _clip_text_height(entity.get("text_height"), options.text_height_range)
         attribs["rotation"] = entity.get("rotation_degrees") or 0.0
-        e = msp.add_text(entity["label_text"], dxfattribs=attribs)
+        e = msp.add_text(label, dxfattribs=attribs)
         e.dxf.insert = pts[0]
-        apply_color(e, entity.get("color_argb"))
-        stats["text"] += 1
+        finish(e, "text")
         return
 
     if kind in POINT_KINDS:
@@ -161,18 +322,23 @@ def add_entity_to_dxf(msp, entity, layer_name, stats, options: WriteOptions):
             stats["skipped"] += 1
             return
         e = msp.add_point(pts[0], dxfattribs=dxfattribs)
-        apply_color(e, entity.get("color_argb"))
-        stats["point"] += 1
+        finish(e, "point")
         return
 
     if kind == "Circle":
         radius = entity.get("radius") or 0.0
-        if not pts or radius <= 0 or radius > options.max_radius:
+        if not pts:
             stats["skipped"] += 1
             return
+        if radius > options.max_radius:
+            stats["skipped"] += 1  # bozuk okuma
+            return
+        if radius <= 0:
+            # NCZ'de yaricap yok -> atlamak yerine varsayilan ile ciz.
+            radius = options.default_circle_radius
+            stats["circle_default_radius"] += 1
         e = msp.add_circle(pts[0], radius, dxfattribs=dxfattribs)
-        apply_color(e, entity.get("color_argb"))
-        stats["circle"] += 1
+        finish(e, "circle")
         return
 
     if kind == "Arc":
@@ -192,26 +358,23 @@ def add_entity_to_dxf(msp, entity, layer_name, stats, options: WriteOptions):
             end_angle=end_deg,
             dxfattribs=dxfattribs,
         )
-        apply_color(e, entity.get("color_argb"))
-        stats["arc"] += 1
+        finish(e, "arc")
         return
 
     if kind in LINE_KINDS:
         if len(pts) < 2:
             stats["skipped"] += 1
             return
-        e = msp.add_lwpolyline(pts, close=False, dxfattribs=dxfattribs)
-        apply_color(e, entity.get("color_argb"))
-        stats["polyline"] += 1
+        e = _add_path(msp, pts, False, dxfattribs, options)
+        finish(e, "polyline")
         return
 
     if kind in POLYGON_KINDS:
         if len(pts) < 3:
             stats["skipped"] += 1
             return
-        e = msp.add_lwpolyline(pts, close=True, dxfattribs=dxfattribs)
-        apply_color(e, entity.get("color_argb"))
-        stats["polygon"] += 1
+        e = _add_path(msp, pts, True, dxfattribs, options)
+        finish(e, "polygon")
         return
 
     stats["unsupported"] += 1
@@ -221,7 +384,13 @@ def _empty_stats():
     return {
         "text": 0, "point": 0, "circle": 0, "arc": 0,
         "polyline": 0, "polygon": 0, "skipped": 0, "unsupported": 0,
+        # bilgi sayaclari (entity_stats toplamina dahil edilmez)
+        "with_z": 0, "circle_default_radius": 0,
     }
+
+
+#: entity_stats toplamina girmeyen, yalnizca raporlama amacli sayaclar
+INFO_COUNTERS = ("skipped", "unsupported", "with_z", "circle_default_radius")
 
 
 def _set_extents(doc, bbox):
@@ -264,6 +433,8 @@ def write_file_dxf(ncz_path: str | Path, out_path: str | Path, options: WriteOpt
 
     doc = ezdxf.new(options.dxf_version)
     doc.header["$INSUNITS"] = 6  # metre
+    if options.write_xdata and XDATA_APPID not in doc.appids:
+        doc.appids.add(XDATA_APPID)  # XDATA icin appid kayitli olmali
     msp = doc.modelspace()
     known_layers = set()
 
@@ -271,7 +442,8 @@ def write_file_dxf(ncz_path: str | Path, out_path: str | Path, options: WriteOpt
     layer_colors = result.get("layer_colors") or []
 
     for entity in kept:
-        layer_name = sanitize_layer_name(entity.get("layer_name") or f"LAYER_{entity.get('layer_code', 0)}")
+        raw_layer = sanitize_dxf_text(entity.get("layer_name"), max_len=200)
+        layer_name = sanitize_layer_name(raw_layer or f"LAYER_{entity.get('layer_code', 0)}")
         ensure_layer(doc, layer_name, known_layers)
         add_entity_to_dxf(msp, entity, layer_name, stats, options)
 
@@ -286,7 +458,9 @@ def write_file_dxf(ncz_path: str | Path, out_path: str | Path, options: WriteOpt
         ok=True,
         parser_epsg=result.get("epsg", ""),
         parser_projection=result.get("projection_text", ""),
-        entity_stats={k: v for k, v in stats.items() if k not in ("skipped", "unsupported")},
+        entity_stats={k: v for k, v in stats.items() if k not in INFO_COUNTERS},
         skipped=stats["skipped"] + stats["unsupported"],
         filter_stats=fstats,
+        with_z=stats["with_z"],
+        circle_default_radius=stats["circle_default_radius"],
     )

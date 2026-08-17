@@ -15,12 +15,21 @@ sys.path.insert(0, str(ROOT))
 
 from ncz_pure_parser import parse_ncz  # noqa: E402
 from ncztool.discovery import find_ncz_files  # noqa: E402
-from ncztool.dxf_writer import WriteOptions, normalize_arc_angles, write_file_dxf  # noqa: E402
-from ncztool.filters import filter_entities  # noqa: E402
+from ncztool.dxf_writer import (  # noqa: E402
+    XDATA_APPID,
+    WriteOptions,
+    clean_z,
+    normalize_arc_angles,
+    sanitize_dxf_text,
+    write_file_dxf,
+)
+from ncztool.filters import filter_entities, find_gap_cut  # noqa: E402
 from ncztool.merger import merge_dxf  # noqa: E402
 
 DATA_DIR = Path(r"C:\Users\myilm\Toplulastirma")
+MENFEZ_DIR = Path(r"C:\Users\myilm\Menfezler")
 requires_data = pytest.mark.skipif(not DATA_DIR.is_dir(), reason="Toplulastirma veri klasoru bu makinede yok")
+requires_menfez = pytest.mark.skipif(not MENFEZ_DIR.is_dir(), reason="Menfezler veri klasoru bu makinede yok")
 
 
 def _bbox_close(bbox, expected, tol=1.0):
@@ -88,6 +97,191 @@ def test_filter_entities_stage_toggles():
     assert stats_both.kept_total == 1
     kept_no_s1, stats_no_s1 = filter_entities(entities, stage1_enabled=False, stage2_enabled=False)
     assert stats_no_s1.kept_total == 2  # hicbir filtre yok
+
+
+# ---------------------------------------------------------------------
+# filters.py -- uyarlanir asama 2 (sabit yaricap yerine bosluk tespiti)
+# ---------------------------------------------------------------------
+
+def test_gap_cut_ignores_continuous_data():
+    """Gercek veri sureklidir: kucuk artislar kesim tetiklememeli."""
+    distances = [float(i) * 1000 for i in range(1, 100)]  # 1..99 km, duzgun
+    assert find_gap_cut(distances) is None
+
+
+def test_gap_cut_finds_far_garbage_cluster():
+    """Uzakta ayri duran cop kumesi kesilmeli (DEMIRYURT deseni)."""
+    distances = [1000.0, 2000.0, 3000.0, 3810.0, 492580.0, 492600.0]
+    cut = find_gap_cut(distances)
+    assert cut == pytest.approx(3810.0)
+
+
+def test_gap_cut_safety_brake_on_majority_drop():
+    """Cop, verinin cogunlugu olamaz; boyle bir kesim reddedilmeli."""
+    distances = [1000.0] + [500_000.0 + i for i in range(99)]
+    assert find_gap_cut(distances) is None
+
+
+@requires_menfez
+def test_province_wide_file_not_emptied():
+    """KNY_FVZPSA_HDT_33_OND.NCZ il geneli bir karayolu menfez verisi
+    (168 x 86 km). Sabit yaricapli eski filtre 10.900 entity'nin TAMAMINI
+    atip BOS DXF uretiyordu -- uyarlanir kesim hicbirini atmamali."""
+    r = parse_ncz(str(MENFEZ_DIR / "KNY_FVZPSA_HDT_33_OND.NCZ"))
+    kept, stats = filter_entities(r["entities"])
+    assert stats.raw_total == 10900
+    assert stats.kept_total == 10900
+    assert stats.stage2_dropped == 0
+    assert stats.stage2_cut_m is None  # veri surekli -> kesim yok
+
+
+def test_stage2_never_silently_empties_output():
+    """Esik bu dosya icin yanlissa asama 2 devre disi kalip UYARMALI,
+    sessizce bos cikti uretmemeli."""
+    entities = [
+        {"geometry_kind": "Point", "layer_code": 1, "coordinates": [{"x": 500000.0 + i * 5, "y": 4100000.0}]}
+        for i in range(20)
+    ]
+    kept, stats = filter_entities(entities, radius=1.0)  # 1 m: herkesi atacak kadar kucuk
+    assert stats.kept_total == 20
+    assert stats.warnings, "asama 2 her seyi atarken uyari verilmeli"
+
+
+# ---------------------------------------------------------------------
+# dxf_writer.py -- kot (Z), oznitelik (XDATA), bozuk metin
+# ---------------------------------------------------------------------
+
+def test_clean_z_rejects_corrupt_and_denormal_values():
+    assert clean_z(1022.37) == pytest.approx(1022.37)
+    assert clean_z(1e34) == 0.0            # bozuk okuma (1^34 degil, 10^34)
+    assert clean_z(-1.3e31) == 0.0
+    assert clean_z(float("nan")) == 0.0
+    assert clean_z(3.19e-27) == 0.0        # denormalize cop -> 2B kabul
+    assert clean_z(None) == 0.0
+
+
+def test_sanitize_dxf_text_drops_binary_garbage():
+    """Tek bir bozuk metin (NUL/satir sonu iceren) DXF'in TAMAMINI
+    okunamaz hale getiriyordu; boyle diziler tamamen atilmali."""
+    assert sanitize_dxf_text("181/32") == "181/32"
+    assert sanitize_dxf_text("KOY_SINIR_ÇĞİÖŞÜ") == "KOY_SINIR_ÇĞİÖŞÜ"
+    assert sanitize_dxf_text("\x81\xa0A\x0f@6\x00\x00\x01") == ""
+    assert sanitize_dxf_text("satir\nsonu") == ""  # DXF satir yapisini bozar
+    assert sanitize_dxf_text(None) == ""
+
+
+@requires_data
+def test_parcel_labels_written_as_xdata(tmp_path):
+    """Parsel numaralari ('label_text'/'name') eskiden DXF'e hic
+    yazilmiyordu; artik XDATA olarak tasinmali."""
+    import ezdxf
+
+    out = tmp_path / "AYRANCI.dxf"
+    assert write_file_dxf(DATA_DIR / "AYRANCI.NCZ", out, WriteOptions()).ok
+    doc = ezdxf.readfile(str(out))
+    labels = []
+    for e in doc.modelspace():
+        if e.has_xdata(XDATA_APPID):
+            labels += [t.value for t in e.get_xdata(XDATA_APPID) if t.code == 1000]
+    assert any(v.startswith("label=") for v in labels)
+    assert any(v.startswith("kind=") for v in labels)
+
+
+@requires_data
+def test_xdata_survives_merge(tmp_path):
+    """ezdxf Importer new_clean_entity()'yi keep_xdata VERMEDEN cagirdigi
+    icin butun XDATA merge sirasinda siliniyordu."""
+    import ezdxf
+
+    src = tmp_path / "AYRANCI.dxf"
+    write_file_dxf(DATA_DIR / "AYRANCI.NCZ", src, WriteOptions())
+    before = sum(1 for e in ezdxf.readfile(str(src)).modelspace() if e.has_xdata(XDATA_APPID))
+    assert before > 0
+
+    merged = tmp_path / "merged.dxf"
+    assert merge_dxf([src], merged, prefix_layers=True).ok
+    after = sum(1 for e in ezdxf.readfile(str(merged)).modelspace() if e.has_xdata(XDATA_APPID))
+    assert after == before
+
+    # monkeypatch geri alinmis olmali
+    import ezdxf.addons.importer as importer_mod
+
+    assert importer_mod.new_clean_entity.__name__ == "new_clean_entity"
+
+
+@requires_menfez
+def test_elevation_written_and_survives_merge(tmp_path):
+    """NCZ'de kot varsa DXF'e gecmeli (3B POLYLINE / 3B POINT) ve
+    birlestirmeden sonra da korunmali."""
+    import ezdxf
+
+    src = tmp_path / "KNY.dxf"
+    res = write_file_dxf(MENFEZ_DIR / "KNY_FVZPSA_HDT_33_OND.NCZ", src, WriteOptions())
+    assert res.ok and res.with_z > 0
+
+    def collect_z(path):
+        zs = []
+        for e in ezdxf.readfile(str(path)).modelspace():
+            t = e.dxftype()
+            if t == "POLYLINE":
+                zs += [v.dxf.location.z for v in e.vertices if abs(v.dxf.location.z) > 1e-6]
+            elif t == "POINT" and abs(e.dxf.location.z) > 1e-6:
+                zs.append(e.dxf.location.z)
+        return zs
+
+    zs = collect_z(src)
+    assert zs, "kot yazilmadi"
+    # Kotlarin buyuk cogunlugu Konya platosu araliginda olmali (olcum:
+    # p5..p100 = 1007..1118 m). Parser'in bazi entity'lerde hatali okudugu
+    # ~%2'lik dusuk deger kalintisi kabul edilir; medyan belirleyicidir.
+    zs.sort()
+    median = zs[len(zs) // 2]
+    assert 900 < median < 1200, f"medyan kot makul degil: {median}"
+    assert max(zs) < 2000, f"asiri yuksek kot: {max(zs)}"
+
+    merged = tmp_path / "merged.dxf"
+    assert merge_dxf([src], merged, prefix_layers=True).ok
+    assert len(collect_z(merged)) == len(zs)
+
+
+def test_circle_without_radius_uses_default():
+    """NCZ'de yaricap yoksa cember atlanmak yerine varsayilan 1 m ile
+    cizilmeli (kullanici istegi)."""
+    import ezdxf
+
+    from ncztool.dxf_writer import _empty_stats, add_entity_to_dxf
+
+    doc = ezdxf.new("R2013")
+    msp = doc.modelspace()
+    stats = _empty_stats()
+    entity = {
+        "geometry_kind": "Circle", "layer_code": 1, "radius": 0.0,
+        "coordinates": [{"x": 500000.0, "y": 4100000.0, "z": 0.0}],
+    }
+    add_entity_to_dxf(msp, entity, "TEST", stats, WriteOptions())
+    circles = [e for e in msp if e.dxftype() == "CIRCLE"]
+    assert len(circles) == 1
+    assert circles[0].dxf.radius == pytest.approx(1.0)
+    assert stats["circle_default_radius"] == 1
+
+
+def test_circle_with_corrupt_radius_still_skipped():
+    """Varsayilan yaricap sadece 'yaricap yok' durumu icin; bozuk (asiri
+    buyuk) okuma yine atlanmali."""
+    import ezdxf
+
+    from ncztool.dxf_writer import _empty_stats, add_entity_to_dxf
+
+    doc = ezdxf.new("R2013")
+    msp = doc.modelspace()
+    stats = _empty_stats()
+    entity = {
+        "geometry_kind": "Circle", "layer_code": 1, "radius": 5_000_000.0,
+        "coordinates": [{"x": 500000.0, "y": 4100000.0, "z": 0.0}],
+    }
+    add_entity_to_dxf(msp, entity, "TEST", stats, WriteOptions())
+    assert [e for e in msp if e.dxftype() == "CIRCLE"] == []
+    assert stats["skipped"] == 1
 
 
 # ---------------------------------------------------------------------
