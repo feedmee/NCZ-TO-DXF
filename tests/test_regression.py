@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from ncz_pure_parser import parse_ncz  # noqa: E402
+from ncztool.cli import build_parser  # noqa: E402
 from ncztool.discovery import find_ncz_files  # noqa: E402
 from ncztool.dxf_writer import (  # noqa: E402
     XDATA_APPID,
@@ -46,7 +47,7 @@ def _bbox_close(bbox, expected, tol=1.0):
 def test_ayranci_kept_intact():
     """Kucuk/tek bolgeli dosyada hicbir sey atilmamali."""
     r = parse_ncz(str(DATA_DIR / "AYRANCI.NCZ"))
-    kept, stats = filter_entities(r["entities"])
+    kept, stats = filter_entities(r["entities"], stage2_enabled=True)
     assert stats.raw_total == 1785
     assert stats.stage1_dropped == 0
     assert stats.stage2_dropped == 0
@@ -59,7 +60,7 @@ def test_demiryurt_drops_block_garbage_and_far_outliers():
     """Blok/sembol tanim copu (asama 1) ve 9 uzak aykiri deger (asama 2)
     atilmali; sonuc 6x7 km'lik gercek dosya alanina inmeli."""
     r = parse_ncz(str(DATA_DIR / "DEMIRYURT.NCZ"))
-    kept, stats = filter_entities(r["entities"])
+    kept, stats = filter_entities(r["entities"], stage2_enabled=True)
     assert stats.raw_total == 31897
     assert stats.stage1_dropped == 30448
     assert stats.stage2_dropped == 9
@@ -75,7 +76,7 @@ def test_guvercinlik_wide_area_data_not_clipped():
     r = parse_ncz(str(DATA_DIR / "Güvercinlik.NCZ"))
     entities = r["entities"]
     nonzero = [e for e in entities if e["layer_code"] != 0]
-    kept, stats = filter_entities(entities)
+    kept, stats = filter_entities(entities, stage2_enabled=True)
     kept_ids = {id(e) for e in kept}
     missing = [e for e in nonzero if id(e) not in kept_ids]
     assert missing == [], f"{len(missing)} gercek entity yanlislikla atildi"
@@ -97,6 +98,55 @@ def test_filter_entities_stage_toggles():
     assert stats_both.kept_total == 1
     kept_no_s1, stats_no_s1 = filter_entities(entities, stage1_enabled=False, stage2_enabled=False)
     assert stats_no_s1.kept_total == 2  # hicbir filtre yok
+
+
+def test_stage2_is_opt_in_for_disconnected_real_locations():
+    """Birbirinden uzak gercek mevkiler varsayilan donusumde silinmemeli.
+
+    Asama 2 yalnizca radyal uzakliga baktigi icin uzak gercek mevki ile cop
+    geometriyi ayiramaz. Bu sentetik dosyada merkezdeki 6 entity ile 200 km
+    uzaktaki 2 entity de gercek veridir; varsayilan filtre hepsini korumali.
+    """
+    entities = [
+        {
+            "geometry_kind": "Point",
+            "layer_code": 1,
+            "coordinates": [{"x": 500_000.0 + i * 10.0, "y": 4_100_000.0}],
+        }
+        for i in range(6)
+    ] + [
+        {
+            "geometry_kind": "Point",
+            "layer_code": 1,
+            "coordinates": [{"x": 700_000.0 + i * 10.0, "y": 4_100_000.0}],
+        }
+        for i in range(2)
+    ]
+
+    kept, stats = filter_entities(entities)
+
+    assert kept == entities
+    assert stats.stage2_dropped == 0
+    assert stats.stage2_cut_m is None
+
+    filtered, filtered_stats = filter_entities(entities, stage2_enabled=True)
+    assert filtered == entities[:6]
+    assert filtered_stats.stage2_dropped == 2
+    assert filtered_stats.stage2_cut_m is not None
+
+
+def test_stage2_defaults_off_across_api_and_cli():
+    """Guvenilir olmayan uzaklik filtresi API ve CLI'da acikca secilmeli."""
+    assert WriteOptions().stage2_enabled is False
+
+    parser = build_parser()
+    default_args = parser.parse_args(["girdi", "--out", "cikti"])
+    enabled_args = parser.parse_args(["girdi", "--out", "cikti", "--stage2"])
+    disabled_args = parser.parse_args(["girdi", "--out", "cikti", "--no-stage2"])
+
+    assert getattr(default_args, "stage2_enabled", True) is False
+    assert getattr(enabled_args, "stage2_enabled", False) is True
+    assert getattr(disabled_args, "stage2_enabled", True) is False
 
 
 # ---------------------------------------------------------------------
@@ -128,7 +178,7 @@ def test_province_wide_file_not_emptied():
     (168 x 86 km). Sabit yaricapli eski filtre 10.900 entity'nin TAMAMINI
     atip BOS DXF uretiyordu -- uyarlanir kesim hicbirini atmamali."""
     r = parse_ncz(str(MENFEZ_DIR / "KNY_FVZPSA_HDT_33_OND.NCZ"))
-    kept, stats = filter_entities(r["entities"])
+    kept, stats = filter_entities(r["entities"], stage2_enabled=True)
     assert stats.raw_total == 10900
     assert stats.kept_total == 10900
     assert stats.stage2_dropped == 0
@@ -142,7 +192,11 @@ def test_stage2_never_silently_empties_output():
         {"geometry_kind": "Point", "layer_code": 1, "coordinates": [{"x": 500000.0 + i * 5, "y": 4100000.0}]}
         for i in range(20)
     ]
-    kept, stats = filter_entities(entities, radius=1.0)  # 1 m: herkesi atacak kadar kucuk
+    kept, stats = filter_entities(
+        entities,
+        radius=1.0,
+        stage2_enabled=True,
+    )  # 1 m: herkesi atacak kadar kucuk
     assert stats.kept_total == 20
     assert stats.warnings, "asama 2 her seyi atarken uyari verilmeli"
 

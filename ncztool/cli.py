@@ -9,7 +9,7 @@ from pathlib import Path
 from .audit import write_report
 from .discovery import find_ncz_files
 from .dxf_writer import ALL_KINDS, WriteOptions, write_file_dxf
-from .filters import LOCAL_RADIUS_M, TR_BBOX
+from .filters import LOCAL_RADIUS_M, STAGE2_DEFAULT_ENABLED, TR_BBOX
 from .merger import merge_dxf
 
 KIND_ALIASES = {
@@ -52,13 +52,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merge-name", default="birlesik.dxf", help="Birlesik DXF dosya adi (varsayilan: birlesik.dxf)")
     p.add_argument("--no-prefix-layers", action="store_true", help="Birlestirirken katman adina dosya adi ekleme")
     p.add_argument("--no-stage1", action="store_true", help="Turkiye TM kutusu filtresini kapat")
-    p.add_argument("--no-stage2", action="store_true", help="Dosya-merkezi uzaklik filtresini kapat")
+    stage2_group = p.add_mutually_exclusive_group()
+    stage2_group.add_argument(
+        "--stage2",
+        dest="stage2_enabled",
+        action="store_true",
+        help="Uyarlanir uzak cop kumesi filtresini ac (cok-mevkili dosyalarda gercek veri silebilir)",
+    )
+    stage2_group.add_argument(
+        "--no-stage2",
+        dest="stage2_enabled",
+        action="store_false",
+        help="Uzak cop kumesi filtresini kapat (varsayilan; eski komutlarla uyumluluk icin)",
+    )
+    p.set_defaults(stage2_enabled=STAGE2_DEFAULT_ENABLED)
     p.add_argument(
         "--radius",
         type=float,
         default=LOCAL_RADIUS_M,
         help="Asama 2 icin istege bagli SERT yaricap tavani, metre. "
-             "Varsayilan: verilmezse uyarlanir bosluk tespiti kullanilir.",
+             "Yalnizca --stage2 ile birlikte kullanilir.",
     )
     p.add_argument("--kinds", default="", help="Sadece bu turleri yaz (virgulle ayrik: text,point,line,polygon,circle,arc,block,symbol). Bos ise hepsi.")
     p.add_argument("--dxf-version", default="R2013", help="DXF surumu (varsayilan R2013)")
@@ -81,7 +94,7 @@ def run_cli(argv=None) -> int:
         dxf_version=args.dxf_version,
         include_kinds=_parse_kinds(args.kinds),
         stage1_enabled=not args.no_stage1,
-        stage2_enabled=not args.no_stage2,
+        stage2_enabled=args.stage2_enabled,
         bbox=TR_BBOX,
         radius=args.radius,
     )

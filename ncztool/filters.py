@@ -38,10 +38,12 @@ buyuk goreli sicrama:
     Guvercinlik (415 cop)            160,07 -> 368,78 km  (  2,3x)  -> kesilir
     DEMIRYURT (9 cop)                  3,81 -> 492,58 km  (129,2x)  -> kesilir
 
-Bu yuzden asama 2 artik uyarlanir: en buyuk mutlak bosluk aranir ve sadece
-bosluk hem mutlak (>= GAP_MIN_ABS_M) hem goreli (>= GAP_MIN_RATIO kat) olarak
-belirginse kesim yapilir. Boylece dosyanin kendi olcegi ne olursa olsun
-gercek veri korunur, uzaktaki cop kume atilir.
+Bu yuzden asama 2 uyarlanir bosluk kesimi kullanir. Ancak yalnizca koordinat
+dagilimina bakarak uzaktaki gercek bir mevki ile cop geometriyi kesin olarak
+ayirmak mumkun degildir. Cok-mevkili dosyalarda gercek veri kaybini onlemek
+icin asama 2 varsayilan olarak KAPALIDIR ve yalnizca kullanici acikca isterse
+calisir. Asama 1, olculen cop geometrinin %99'undan fazlasini tek basina
+temizler.
 """
 from __future__ import annotations
 
@@ -68,6 +70,10 @@ MAX_STAGE2_DROP_FRACTION = 0.40
 # Istege bagli SERT ust sinir (metre). Varsayilan None = sadece uyarlanir
 # kesim kullanilir. GUI'den bir deger verilirse ek bir tavan olarak calisir.
 LOCAL_RADIUS_M = None
+
+# Uzaklik dagilimi tek basina gercek/copu kesin ayiramaz. Veri kaybi yerine
+# az miktarda cop geometriyi korumak daha guvenlidir; asama 2 opt-in'dir.
+STAGE2_DEFAULT_ENABLED = False
 
 
 @dataclass
@@ -180,7 +186,7 @@ def filter_entities(
     bbox: tuple = TR_BBOX,
     radius: float = LOCAL_RADIUS_M,
     stage1_enabled: bool = True,
-    stage2_enabled: bool = True,
+    stage2_enabled: bool = STAGE2_DEFAULT_ENABLED,
 ) -> tuple[list[dict], FilterStats]:
     """Cop blok/sembol tanim geometrisini ve uc aykiri degerleri temizler.
 

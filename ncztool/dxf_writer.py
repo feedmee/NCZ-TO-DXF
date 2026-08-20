@@ -41,7 +41,13 @@ from pathlib import Path
 import ezdxf
 
 from ncz_pure_parser import parse_ncz
-from .filters import LOCAL_RADIUS_M, TR_BBOX, FilterStats, filter_entities
+from .filters import (
+    LOCAL_RADIUS_M,
+    STAGE2_DEFAULT_ENABLED,
+    TR_BBOX,
+    FilterStats,
+    filter_entities,
+)
 
 POINT_KINDS = {"Point", "Symbol", "Block"}
 LINE_KINDS = {"Line", "Polyline"}
@@ -89,7 +95,7 @@ class WriteOptions:
     dxf_version: str = "R2013"
     include_kinds: set = field(default_factory=lambda: set(ALL_KINDS))
     stage1_enabled: bool = True
-    stage2_enabled: bool = True
+    stage2_enabled: bool = STAGE2_DEFAULT_ENABLED
     bbox: tuple = TR_BBOX
     radius: float | None = LOCAL_RADIUS_M
     text_height_range: tuple = (TEXT_HEIGHT_MIN, TEXT_HEIGHT_MAX)

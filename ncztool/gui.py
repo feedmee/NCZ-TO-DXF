@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 from .audit import detect_duplicates, write_report
 from .discovery import find_ncz_files
 from .dxf_writer import ALL_KINDS, LINE_KINDS, POINT_KINDS, POLYGON_KINDS, WriteOptions, write_file_dxf
-from .filters import LOCAL_RADIUS_M, TR_BBOX
+from .filters import LOCAL_RADIUS_M, STAGE2_DEFAULT_ENABLED, TR_BBOX
 from .merger import merge_dxf
 
 KIND_GROUPS = [
@@ -44,8 +44,8 @@ class NCZ2DXFApp(tk.Tk):
         self.status_text = tk.StringVar(value="Hazir.")
 
         self.stage1_var = tk.BooleanVar(value=True)
-        self.stage2_var = tk.BooleanVar(value=True)
-        # Bos = uyarlanir kesim (varsayilan). Bir sayi girilirse ek sert tavan.
+        self.stage2_var = tk.BooleanVar(value=STAGE2_DEFAULT_ENABLED)
+        # Bos = uyarlanir kesim. Bir sayi girilirse ek sert tavan.
         self.radius_km_var = tk.StringVar(value="")
         self.prefix_layers_var = tk.BooleanVar(value=True)
         self.kind_vars = {label: tk.BooleanVar(value=True) for label, _ in KIND_GROUPS}
@@ -115,12 +115,20 @@ class NCZ2DXFApp(tk.Tk):
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
         ttk.Label(right, text="Filtre:").pack(anchor="w")
         ttk.Checkbutton(right, text="Turkiye TM kutusu (asama 1)", variable=self.stage1_var).pack(anchor="w")
-        ttk.Checkbutton(right, text="Uzak cop kumesi (asama 2)", variable=self.stage2_var).pack(anchor="w")
+        ttk.Checkbutton(
+            right,
+            text="Uzak cop kumesi (asama 2, istege bagli)",
+            variable=self.stage2_var,
+        ).pack(anchor="w")
         radius_row = ttk.Frame(right)
         radius_row.pack(anchor="w", pady=(2, 0))
         ttk.Label(radius_row, text="  Yaricap (km):").pack(side="left")
         ttk.Entry(radius_row, textvariable=self.radius_km_var, width=8).pack(side="left")
-        ttk.Label(right, text="  (bos birakin = otomatik)", foreground="gray").pack(anchor="w")
+        ttk.Label(
+            right,
+            text="  (cok-mevkili dosyalarda kapali tutun)",
+            foreground="gray",
+        ).pack(anchor="w")
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
         ttk.Button(right, text="DXF Uret", command=self._start_step1).pack(anchor="w")

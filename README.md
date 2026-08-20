@@ -42,10 +42,13 @@ Adim 2 **Adim 1'e bagli degildir**: program kapatilip acildiginda da cikti
 klasorundeki mevcut DXF'ler otomatik listelenir (**Yenile** ile tazelenir,
 **DXF klasoru sec...** ile baska bir klasordeki DXF'ler de birlestirilebilir).
 
-Filtre ayarindaki **Yaricap (km)** alani bos birakilirsa asama 2 uyarlanir
-calisir: dosyanin kendi olcegi ne olursa olsun (bir mevki de olabilir, il
-geneli bir veri seti de) gercek veri korunur, yalnizca uzakta ayri duran cop
-kume atilir. Alana bir sayi girilirse ek bir sert tavan olarak uygulanir.
+**Asama 2 varsayilan olarak kapalidir.** Yalnizca koordinat dagilimina bakan
+uzaklik filtresi, cok-mevkili dosyalarda uzaktaki gercek bir mevkiyi cop kume
+sanabilir. Asama 1 olculen cop geometrinin %99'undan fazlasini tek basina
+temizledigi icin veri kaybi yerine az miktarda cop geometriyi korumak tercih
+edilir. Tek-mevkili oldugunu bildiginiz dosyalarda GUI kutusuyla veya
+`--stage2` ile asama 2'yi acabilirsiniz. **Yaricap (km)** alani bosken
+uyarlanir bosluk kesimi, sayi verildiginde ek bir sert tavan kullanilir.
 
 Her calisma sonunda `donusum_raporu.txt` yazilir: dosya basina entity
 sayilari, atilan cop/aykiri veri, tespit edilen CRS (bilgi amacli, donusum
@@ -57,7 +60,8 @@ yapilmaz), olasi mukerrer dosya ciftleri, farkli datum uyarilari.
 NCZ2DXF.exe <ncz_klasoru> --out <cikti_klasoru> --merge
 ```
 
-Onemli secenekler: `--no-stage1` / `--no-stage2` (filtreleri kapat),
+Onemli secenekler: `--no-stage1`, `--stage2` (istege bagli uzaklik filtresi),
+`--no-stage2` (geriye uyumlu, varsayilan davranis),
 `--radius <metre>`, `--kinds text,point,line,polygon,circle,arc,block,symbol`,
 `--no-prefix-layers`. Tum secenekler: `NCZ2DXF.exe --help`.
 
